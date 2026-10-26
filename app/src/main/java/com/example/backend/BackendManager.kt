@@ -2,6 +2,7 @@ package com.example.backend
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.backend.ollama.OllamaClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,7 +52,9 @@ class BackendManager(context: Context) {
         if (type == BackendType.GEMINI && !_activeModelName.value.startsWith("gemini")) {
             setModel("gemini-3.8-flash")
         } else if (type == BackendType.LOCAL && _activeModelName.value.startsWith("gemini")) {
-            setModel("llama3")
+            _activeModelName.value = ""
+            prefs.edit().putString("active_model", "").apply()
+            localBackend.selectedModel = ""
         }
     }
 
@@ -62,8 +65,13 @@ class BackendManager(context: Context) {
     }
 
     fun setLocalEndpoint(endpoint: String) {
-        _localEndpoint.value = endpoint
-        prefs.edit().putString("local_endpoint", endpoint).apply()
-        localBackend.updateEndpoint(endpoint, _activeModelName.value)
+        val cleaned = endpoint.trim()
+        if (cleaned.isBlank() || !OllamaClient.isValidBaseUrl(cleaned)) {
+            return
+        }
+
+        _localEndpoint.value = cleaned
+        prefs.edit().putString("local_endpoint", cleaned).apply()
+        localBackend.updateEndpoint(cleaned, _activeModelName.value)
     }
 }

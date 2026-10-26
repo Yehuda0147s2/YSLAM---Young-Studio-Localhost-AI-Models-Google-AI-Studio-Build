@@ -8,7 +8,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -49,10 +48,9 @@ class AuthManager(private val context: Context) {
             return
         }
 
-        val clientId = try {
-            context.getString(R.string.default_web_client_id)
-        } catch (e: Exception) {
-            Log.w("AuthManager", "default_web_client_id not found", e)
+        val clientId = getDefaultWebClientId()
+        if (clientId == null) {
+            Log.w("AuthManager", "Google Sign-In is not configured: default_web_client_id is missing")
             return
         }
 
@@ -88,9 +86,8 @@ class AuthManager(private val context: Context) {
         onSuccess: (FirebaseUser) -> Unit,
         onError: (String) -> Unit
     ) {
-        val clientId = try {
-            context.getString(R.string.default_web_client_id)
-        } catch (e: Exception) {
+        val clientId = getDefaultWebClientId()
+        if (clientId == null) {
             val err = "Google Sign-In configuration missing: default_web_client_id not found"
             _authError.value = err
             onError(err)
@@ -148,5 +145,14 @@ class AuthManager(private val context: Context) {
                 onComplete()
             }
         }
+    }
+
+    private fun getDefaultWebClientId(): String? {
+        val resourceId = context.resources.getIdentifier(
+            "default_web_client_id",
+            "string",
+            context.packageName
+        )
+        return if (resourceId == 0) null else context.getString(resourceId).takeIf { it.isNotBlank() }
     }
 }

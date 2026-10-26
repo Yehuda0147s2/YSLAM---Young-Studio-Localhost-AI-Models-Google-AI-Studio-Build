@@ -24,11 +24,13 @@ import com.example.util.permission.NotificationHelper
 import com.google.firebase.auth.FirebaseUser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 import kotlin.system.measureTimeMillis
@@ -99,6 +101,75 @@ class YslamViewModel(application: Application) : AndroidViewModel(application) {
     private var chatGenerationJob: Job? = null
     private var playgroundJob: Job? = null
     private var messageObserveJob: Job? = null
+    private var healthMonitorJob: Job? = null
+
+    private fun isRetryable(e: Throwable): Boolean {
+        val msg = e.message.orEmpty().lowercase()
+        val nonRetryable = listOf(
+            "401", "403", "invalid api key", "unauthorized",
+            "model not found", "404"
+        )
+        return nonRetryable.none { msg.contains(it) }
+    }
+
+    private suspend fun streamWithRetry(
+        backend: AiBackend,
+        request: GenerationRequest,
+        maxAttempts: Int = 3,
+        onAccumulated: (String) -> Unit
+    ): Pair<String, Long> {
+        val delays = listOf(0L, 2_000L, 5_000L)
+        var lastException: Throwable? = null
+
+        for (attempt in 0 until maxAttempts) {
+            if (attempt > 0) delay(delays.getOrElse(attempt) { delays.last() })
+            try {
+                val startedAt = System.currentTimeMillis()
+                val buffer = StringBuilder()
+                var streamError: String? = null
+
+                backend.generateStream(request).collect { chunk ->
+                    if (chunk.error != null) {
+                        streamError = chunk.error
+                    } else if (chunk.delta.isNotEmpty()) {
+                        buffer.append(chunk.delta)
+                        onAccumulated(buffer.toString())
+                    }
+                }
+
+                if (streamError != null) throw Exception(streamError)
+                return buffer.toString() to (System.currentTimeMillis() - startedAt)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                lastException = e
+                if (!isRetryable(e)) throw e
+            }
+        }
+        throw lastException ?: Exception("Stream failed after $maxAttempts attempts")
+    }
+
+    private fun startHealthMonitoring() {
+        healthMonitorJob?.cancel()
+        healthMonitorJob = viewModelScope.launch {
+            while (isActive) {
+                delay(5_000)
+                if (!_isGeneratingChat.value && !_playgroundState.value.isGenerating) {
+                    try {
+                        val status = backendManager.getActiveBackend().checkHealth()
+                        val current = _healthStatus.value
+                        if (current?.isHealthy != status.isHealthy || current?.message != status.message) {
+                            _healthStatus.value = status
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // Silent — next poll will try again.
+                    }
+                }
+            }
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -113,6 +184,7 @@ class YslamViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         checkBackendHealth()
+        startHealthMonitoring()
     }
 
     fun selectSession(sessionId: String) {
@@ -221,16 +293,11 @@ class YslamViewModel(application: Application) : AndroidViewModel(application) {
 
             chatGenerationJob = launch {
                 try {
-                    latency = measureTimeMillis {
-                        backend.generateStream(request).collect { chunk ->
-                            if (chunk.error != null) {
-                                _chatError.value = chunk.error
-                            } else if (chunk.delta.isNotEmpty()) {
-                                fullResponse.append(chunk.delta)
-                                _chatStreamingText.value = fullResponse.toString()
-                            }
-                        }
+                    val (responseText, responseLatency) = streamWithRetry(backend, request) { accumulated ->
+                        _chatStreamingText.value = accumulated
                     }
+                    latency = responseLatency
+                    fullResponse.append(responseText)
 
                     if (fullResponse.isNotEmpty()) {
                         HapticFeedbackHelper.vibrateSuccess(getApplication())
@@ -329,18 +396,11 @@ class YslamViewModel(application: Application) : AndroidViewModel(application) {
 
         playgroundJob = viewModelScope.launch {
             try {
-                latency = measureTimeMillis {
-                    backend.generateStream(request).collect { chunk ->
-                        if (chunk.error != null) {
-                            _playgroundState.value = _playgroundState.value.copy(error = chunk.error)
-                        } else if (chunk.delta.isNotEmpty()) {
-                            fullOutput.append(chunk.delta)
-                            _playgroundState.value = _playgroundState.value.copy(
-                                generatedCode = fullOutput.toString()
-                            )
-                        }
-                    }
+                val (responseText, responseLatency) = streamWithRetry(backend, request) { accumulated ->
+                    _playgroundState.value = _playgroundState.value.copy(generatedCode = accumulated)
                 }
+                latency = responseLatency
+                fullOutput.append(responseText)
                 _playgroundState.value = _playgroundState.value.copy(
                     isGenerating = false,
                     latencyMs = latency
@@ -399,7 +459,17 @@ class YslamViewModel(application: Application) : AndroidViewModel(application) {
     // Backend & Settings Actions
     fun setBackend(type: BackendType) {
         backendManager.setBackend(type)
-        checkBackendHealth()
+        viewModelScope.launch {
+            if (backendManager.activeModelName.value.isBlank()) {
+                val models = backendManager.getActiveBackend().listModels()
+                if (models.isNotEmpty()) {
+                    backendManager.setModel(models.first())
+                } else {
+                    _chatError.value = "No models found. In Termux: ollama pull qwen2.5-coder:1.5b"
+                }
+            }
+            checkBackendHealth()
+        }
     }
 
     fun setModel(model: String) {
@@ -429,5 +499,13 @@ class YslamViewModel(application: Application) : AndroidViewModel(application) {
                 _isPinging.value = false
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        healthMonitorJob?.cancel()
+        chatGenerationJob?.cancel()
+        playgroundJob?.cancel()
+        messageObserveJob?.cancel()
     }
 }

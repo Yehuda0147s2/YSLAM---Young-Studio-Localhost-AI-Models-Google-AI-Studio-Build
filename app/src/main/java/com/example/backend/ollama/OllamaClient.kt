@@ -7,13 +7,16 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody
 import okhttp3.logging.HttpLoggingInterceptor
-import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import java.io.BufferedReader
@@ -71,13 +74,48 @@ class OllamaClient(
         const val DEFAULT_WRITE_TIMEOUT_SECONDS = 30L
         private const val TAG = "OllamaClient"
 
+        fun isValidBaseUrl(url: String): Boolean {
+            val trimmed = url.trim()
+            if (trimmed.isEmpty() || trimmed.contains(Regex("\\s+"))) {
+                return false
+            }
+
+            return try {
+                val candidate = if (trimmed.contains("://")) {
+                    val scheme = trimmed.substringBefore("://").lowercase()
+                    if (scheme !in setOf("http", "https")) {
+                        return false
+                    }
+                    trimmed
+                } else {
+                    "http://$trimmed"
+                }
+
+                val uri = java.net.URI(candidate)
+                val scheme = uri.scheme?.lowercase()
+                val host = uri.host
+                scheme in setOf("http", "https") && !host.isNullOrBlank()
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         fun normalizeBaseUrl(url: String): String {
             val trimmed = url.trim()
-            val withScheme = if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-                "http://$trimmed"
-            } else {
-                trimmed
+            if (trimmed.isEmpty()) {
+                return DEFAULT_ENDPOINT_URL + "/"
             }
+
+            val withScheme = if (trimmed.contains("://")) {
+                trimmed
+            } else {
+                "http://$trimmed"
+            }
+
+            if (!isValidBaseUrl(withScheme)) {
+                return DEFAULT_ENDPOINT_URL + "/"
+            }
+
             return if (withScheme.endsWith("/")) withScheme else "$withScheme/"
         }
     }
@@ -88,6 +126,7 @@ class OllamaClient(
     private val moshi: Moshi = Moshi.Builder()
         .addLast(KotlinJsonAdapterFactory())
         .build()
+    private val streamRecordAdapter = moshi.adapter(OllamaStreamRecord::class.java)
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(connectTimeoutSeconds, TimeUnit.SECONDS)
@@ -132,6 +171,83 @@ class OllamaClient(
      */
     fun service(): OllamaApiService = apiService
 
+    internal fun parseChatStreamLine(line: String): StreamChunk {
+        val record = parseStreamRecord(line)
+        if (record.message == null && !record.done && record.error.isNullOrBlank()) {
+            throw OllamaProtocolException("Ollama returned an unexpected chat stream record.")
+        }
+        return StreamChunk(
+            delta = record.message?.content.orEmpty(),
+            isComplete = record.done,
+            error = record.error?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    internal fun parseGenerateStreamLine(line: String): StreamChunk {
+        val record = parseStreamRecord(line)
+        if (record.response == null && !record.done && record.error.isNullOrBlank()) {
+            throw OllamaProtocolException("Ollama returned an unexpected generate stream record.")
+        }
+        return StreamChunk(
+            delta = record.response.orEmpty(),
+            isComplete = record.done,
+            error = record.error?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun parseStreamRecord(line: String): OllamaStreamRecord {
+        return try {
+            streamRecordAdapter.fromJson(line)
+                ?: throw OllamaProtocolException("Ollama returned an empty stream record.")
+        } catch (e: OllamaProtocolException) {
+            throw e
+        } catch (e: Exception) {
+            throw OllamaProtocolException(
+                "Ollama returned unparseable data. Version mismatch?",
+                e
+            )
+        }
+    }
+
+    internal fun streamFromBody(
+        responseBody: ResponseBody,
+        parseLine: (String) -> StreamChunk
+    ): Flow<StreamChunk> = flow {
+        var completed = false
+        responseBody.use { body ->
+            BufferedReader(InputStreamReader(body.byteStream())).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.isBlank()) continue
+
+                    val chunk = parseLine(line)
+                    if (chunk.error != null) {
+                        emit(StreamChunk(delta = "", isComplete = true, error = chunk.error))
+                        completed = true
+                        break
+                    }
+                    if (chunk.delta.isNotEmpty()) {
+                        emit(chunk.copy(isComplete = false))
+                    }
+                    if (chunk.isComplete) {
+                        emit(StreamChunk(delta = "", isComplete = true))
+                        completed = true
+                        break
+                    }
+                }
+            }
+        }
+        if (!completed) {
+            emit(
+                StreamChunk(
+                    delta = "",
+                    isComplete = true,
+                    error = "Ollama stream ended before completion; the response may be incomplete."
+                )
+            )
+        }
+    }
+
     /**
      * Performs a health check by calling GET /api/tags via Retrofit.
      * Accurately distinguishes between connection timeouts and server unreachable states.
@@ -146,12 +262,21 @@ class OllamaClient(
             }
 
             val modelNames = models.map { it.name }.filter { it.isNotBlank() }
-            HealthStatus(
-                isHealthy = true,
-                latencyMs = latency,
-                message = "Connected to Ollama ($targetUrl). ${modelNames.size} local models available.",
-                availableModels = if (modelNames.isNotEmpty()) modelNames else listOf("llama3", "codellama", "mistral")
-            )
+            if (modelNames.isEmpty()) {
+                HealthStatus(
+                    isHealthy = false,
+                    latencyMs = latency,
+                    message = "Ollama is running but has no models installed. In Termux: ollama pull qwen2.5-coder:1.5b",
+                    availableModels = emptyList()
+                )
+            } else {
+                HealthStatus(
+                    isHealthy = true,
+                    latencyMs = latency,
+                    message = "Connected to Ollama ($targetUrl). ${modelNames.size} local models available.",
+                    availableModels = modelNames
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -183,15 +308,82 @@ class OllamaClient(
         }
     }
 
+    suspend fun verifyInference(modelName: String, timeoutSeconds: Long = 15L): HealthStatus = withContext(Dispatchers.IO) {
+        val targetModel = modelName.trim()
+        val targetUrl = endpointUrl.removeSuffix("/")
+        if (targetModel.isBlank()) {
+            return@withContext HealthStatus(
+                isHealthy = false,
+                latencyMs = 0L,
+                message = "No model selected. Pick one in Settings.",
+                availableModels = emptyList()
+            )
+        }
+
+        try {
+            val startedAt = System.currentTimeMillis()
+            val response = withTimeout(TimeUnit.SECONDS.toMillis(timeoutSeconds)) {
+                apiService.generate(
+                    OllamaGenerateRequest(
+                        model = targetModel,
+                        prompt = "ping",
+                        stream = false,
+                        options = OllamaOptions(
+                            temperature = 0f,
+                            topP = 0.9f,
+                            numPredict = 1
+                        )
+                    )
+                )
+            }
+            val latency = System.currentTimeMillis() - startedAt
+            val content = response.response.orEmpty()
+            if (content.isBlank()) {
+                HealthStatus(
+                    isHealthy = false,
+                    latencyMs = latency,
+                    message = "Model '$targetModel' loaded but returned no output. Check OOM in Termux.",
+                    availableModels = emptyList()
+                )
+            } else {
+                HealthStatus(
+                    isHealthy = true,
+                    latencyMs = latency,
+                    message = "Inference verified with '$targetModel' in ${latency}ms",
+                    availableModels = emptyList()
+                )
+            }
+        } catch (e: TimeoutCancellationException) {
+            HealthStatus(
+                isHealthy = false,
+                latencyMs = 0L,
+                message = "Inference timed out after ${timeoutSeconds}s. Model may be OOM or too large for this device.",
+                availableModels = emptyList()
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            val translated = translateOllamaException(t, targetUrl, timeoutSeconds)
+            HealthStatus(
+                isHealthy = false,
+                latencyMs = 0L,
+                message = "Inference failed: ${translated.message}",
+                availableModels = emptyList()
+            )
+        }
+    }
+
     /**
      * Queries available model tags using the Retrofit service.
      */
     suspend fun listModels(): List<String> = withContext(Dispatchers.IO) {
-        val health = checkHealth()
-        if (health.isHealthy && health.availableModels.isNotEmpty()) {
-            health.availableModels
-        } else {
-            listOf("llama3", "codellama", "mistral", "qwen2.5-coder", "deepseek-coder", "phi3")
+        try {
+            apiService.getTags().models.map { it.name }.filter { it.isNotBlank() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            SafeLog.w(TAG, "Could not fetch Ollama models: ${e.message}", e)
+            emptyList()
         }
     }
 
@@ -201,6 +393,8 @@ class OllamaClient(
     suspend fun getVersion(): String? = withContext(Dispatchers.IO) {
         try {
             apiService.getVersion().version
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             SafeLog.d(TAG, "Could not fetch Ollama version: ${e.message}")
             null
@@ -214,32 +408,7 @@ class OllamaClient(
     fun streamChat(request: OllamaChatRequest): Flow<StreamChunk> = flow {
         val targetUrl = endpointUrl.removeSuffix("/")
         try {
-            val responseBody = apiService.chatStream(request)
-            val inputStream = responseBody.byteStream()
-            val reader = BufferedReader(InputStreamReader(inputStream))
-
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val lineContent = line?.trim().orEmpty()
-                if (lineContent.isNotEmpty()) {
-                    try {
-                        val json = JSONObject(lineContent)
-                        val messageObj = json.optJSONObject("message")
-                        val delta = messageObj?.optString("content") ?: json.optString("response", "")
-                        val isDone = json.optBoolean("done", false)
-
-                        if (delta.isNotEmpty()) {
-                            emit(StreamChunk(delta = delta, isComplete = false))
-                        }
-                        if (isDone) {
-                            emit(StreamChunk(delta = "", isComplete = true))
-                            break
-                        }
-                    } catch (e: Exception) {
-                        SafeLog.w(TAG, "Failed parsing NDJSON line: $lineContent", e)
-                    }
-                }
-            }
+            emitAll(streamFromBody(apiService.chatStream(request), ::parseChatStreamLine))
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -255,31 +424,7 @@ class OllamaClient(
     fun streamGenerate(request: OllamaGenerateRequest): Flow<StreamChunk> = flow {
         val targetUrl = endpointUrl.removeSuffix("/")
         try {
-            val responseBody = apiService.generateStream(request)
-            val inputStream = responseBody.byteStream()
-            val reader = BufferedReader(InputStreamReader(inputStream))
-
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val lineContent = line?.trim().orEmpty()
-                if (lineContent.isNotEmpty()) {
-                    try {
-                        val json = JSONObject(lineContent)
-                        val delta = json.optString("response", "")
-                        val isDone = json.optBoolean("done", false)
-
-                        if (delta.isNotEmpty()) {
-                            emit(StreamChunk(delta = delta, isComplete = false))
-                        }
-                        if (isDone) {
-                            emit(StreamChunk(delta = "", isComplete = true))
-                            break
-                        }
-                    } catch (e: Exception) {
-                        SafeLog.w(TAG, "Failed parsing NDJSON generate line: $lineContent", e)
-                    }
-                }
-            }
+            emitAll(streamFromBody(apiService.generateStream(request), ::parseGenerateStreamLine))
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
