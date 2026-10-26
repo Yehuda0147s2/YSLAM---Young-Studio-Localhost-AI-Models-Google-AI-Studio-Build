@@ -25,7 +25,7 @@ class LocalServerUnreachableException(endpointUrl: String, cause: Throwable? = n
  */
 class LocalBackend(
     var endpointUrl: String = "http://10.0.2.2:11434",
-    var selectedModel: String = "llama3"
+    var selectedModel: String = ""
 ) : AiBackend {
 
     override val type: BackendType = BackendType.LOCAL
@@ -76,7 +76,54 @@ class LocalBackend(
     }
 
     override suspend fun checkHealth(): HealthStatus {
-        return ollamaClient.checkHealth()
+        val baseHealth = ollamaClient.checkHealth()
+        if (!baseHealth.isHealthy) return baseHealth
+
+        val availableModels = baseHealth.availableModels
+        if (availableModels.isEmpty()) {
+            return HealthStatus(
+                isHealthy = false,
+                latencyMs = baseHealth.latencyMs,
+                message = "Ollama is running but has no models installed. In Termux: ollama pull qwen2.5-coder:1.5b",
+                availableModels = emptyList()
+            )
+        }
+
+        val modelToCheck = selectedModel.trim()
+        if (modelToCheck.isBlank()) {
+            return HealthStatus(
+                isHealthy = false,
+                latencyMs = baseHealth.latencyMs,
+                message = "No model selected. Pick one in Settings.",
+                availableModels = availableModels
+            )
+        }
+
+        if (!availableModels.contains(modelToCheck)) {
+            return HealthStatus(
+                isHealthy = false,
+                latencyMs = baseHealth.latencyMs,
+                message = "Model '$modelToCheck' is not installed. Available: ${availableModels.joinToString()}. Pull it or switch models.",
+                availableModels = availableModels
+            )
+        }
+
+        val inference = ollamaClient.verifyInference(modelToCheck)
+        return if (inference.isHealthy) {
+            HealthStatus(
+                isHealthy = true,
+                latencyMs = baseHealth.latencyMs + inference.latencyMs,
+                message = "Connected ($endpointUrl). ${availableModels.size} models. Inference verified in ${inference.latencyMs}ms.",
+                availableModels = availableModels
+            )
+        } else {
+            HealthStatus(
+                isHealthy = false,
+                latencyMs = baseHealth.latencyMs,
+                message = inference.message,
+                availableModels = availableModels
+            )
+        }
     }
 
     override suspend fun listModels(): List<String> {

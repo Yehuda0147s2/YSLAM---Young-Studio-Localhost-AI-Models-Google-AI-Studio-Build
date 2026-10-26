@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Compile
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: Lint
+        run: ./gradlew :app:lintDebug
+
+      - name: Invariant - no fake model lists
+        run: |
+          if grep -rn 'listOf("llama3", "codellama"\|listOf("codellama", "mistral"' app/src/main/java/; then
+            echo "Hardcoded model list found"
+            exit 1
+          fi
+
+      - name: Invariant - no hardcoded connected state
+        run: |
+          echo "Reviewing isHealthy = true occurrences"
+          grep -rn 'isHealthy = true' app/src/main/java/ || true
+
+      - name: Invariant - no keystore committed
+        run: |
+          if git ls-files | grep -E '\.jks$|\.keystore$|keystore/' ; then
+            echo "Keystore file committed to git"
+            exit 1
+          fi

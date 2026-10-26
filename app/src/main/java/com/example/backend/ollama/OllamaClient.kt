@@ -7,10 +7,12 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import org.json.JSONObject
@@ -146,12 +148,21 @@ class OllamaClient(
             }
 
             val modelNames = models.map { it.name }.filter { it.isNotBlank() }
-            HealthStatus(
-                isHealthy = true,
-                latencyMs = latency,
-                message = "Connected to Ollama ($targetUrl). ${modelNames.size} local models available.",
-                availableModels = if (modelNames.isNotEmpty()) modelNames else listOf("llama3", "codellama", "mistral")
-            )
+            if (modelNames.isEmpty()) {
+                HealthStatus(
+                    isHealthy = false,
+                    latencyMs = latency,
+                    message = "Ollama is running but has no models installed. In Termux: ollama pull qwen2.5-coder:1.5b",
+                    availableModels = emptyList()
+                )
+            } else {
+                HealthStatus(
+                    isHealthy = true,
+                    latencyMs = latency,
+                    message = "Connected to Ollama ($targetUrl). ${modelNames.size} local models available.",
+                    availableModels = modelNames
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -183,15 +194,79 @@ class OllamaClient(
         }
     }
 
+    suspend fun verifyInference(modelName: String, timeoutSeconds: Long = 15L): HealthStatus = withContext(Dispatchers.IO) {
+        val targetModel = modelName.trim()
+        val targetUrl = endpointUrl.removeSuffix("/")
+        if (targetModel.isBlank()) {
+            return@withContext HealthStatus(
+                isHealthy = false,
+                latencyMs = 0L,
+                message = "No model selected. Pick one in Settings.",
+                availableModels = emptyList()
+            )
+        }
+
+        try {
+            val startedAt = System.currentTimeMillis()
+            val response = withTimeout(TimeUnit.SECONDS.toMillis(timeoutSeconds)) {
+                apiService.generate(
+                    OllamaGenerateRequest(
+                        model = targetModel,
+                        prompt = "ping",
+                        stream = false,
+                        options = OllamaOptions(
+                            temperature = 0f,
+                            topP = 0.9f,
+                            numPredict = 1
+                        )
+                    )
+                )
+            }
+            val latency = System.currentTimeMillis() - startedAt
+            val content = response.response.orEmpty()
+            if (content.isBlank()) {
+                HealthStatus(
+                    isHealthy = false,
+                    latencyMs = latency,
+                    message = "Model '$targetModel' loaded but returned no output. Check OOM in Termux.",
+                    availableModels = emptyList()
+                )
+            } else {
+                HealthStatus(
+                    isHealthy = true,
+                    latencyMs = latency,
+                    message = "Inference verified with '$targetModel' in ${latency}ms",
+                    availableModels = emptyList()
+                )
+            }
+        } catch (e: TimeoutCancellationException) {
+            HealthStatus(
+                isHealthy = false,
+                latencyMs = 0L,
+                message = "Inference timed out after ${timeoutSeconds}s. Model may be OOM or too large for this device.",
+                availableModels = emptyList()
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            val translated = translateOllamaException(t, targetUrl, timeoutSeconds)
+            HealthStatus(
+                isHealthy = false,
+                latencyMs = 0L,
+                message = "Inference failed: ${translated.message}",
+                availableModels = emptyList()
+            )
+        }
+    }
+
     /**
      * Queries available model tags using the Retrofit service.
      */
     suspend fun listModels(): List<String> = withContext(Dispatchers.IO) {
-        val health = checkHealth()
-        if (health.isHealthy && health.availableModels.isNotEmpty()) {
-            health.availableModels
-        } else {
-            listOf("llama3", "codellama", "mistral", "qwen2.5-coder", "deepseek-coder", "phi3")
+        try {
+            apiService.getTags().models.map { it.name }.filter { it.isNotBlank() }
+        } catch (_: Throwable) {
+            emptyList()
         }
     }
 

@@ -51,7 +51,9 @@ class BackendManager(context: Context) {
         if (type == BackendType.GEMINI && !_activeModelName.value.startsWith("gemini")) {
             setModel("gemini-3.8-flash")
         } else if (type == BackendType.LOCAL && _activeModelName.value.startsWith("gemini")) {
-            setModel("llama3")
+            _activeModelName.value = ""
+            prefs.edit().putString("active_model", "").apply()
+            localBackend.selectedModel = ""
         }
     }
 
