@@ -1,0 +1,131 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account information and profile metadata",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name"
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "User avatar URL"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Account registration timestamp submitted as FieldValue.serverTimestamp()"
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last sign-in timestamp submitted as FieldValue.serverTimestamp()"
+        }
+      },
+      "required": ["userId", "email", "displayName", "createdAt"]
+    },
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "User chat conversation session metadata",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique session ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title or summary of conversation"
+        },
+        "backendType": {
+          "type": "string",
+          "description": "GEMINI or LOCAL"
+        },
+        "modelName": {
+          "type": "string",
+          "description": "Active model used"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last updated timestamp"
+        }
+      },
+      "required": ["id", "userId", "title", "backendType", "modelName", "createdAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual message in a conversation thread",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique message ID"
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Parent session ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID"
+        },
+        "role": {
+          "type": "string",
+          "description": "user, assistant, or system"
+        },
+        "content": {
+          "type": "string",
+          "description": "Message content or markdown code"
+        },
+        "modelUsed": {
+          "type": "string",
+          "description": "Model used if assistant response"
+        },
+        "latencyMs": {
+          "type": "integer",
+          "description": "Latency in milliseconds"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Message timestamp"
+        }
+      },
+      "required": ["id", "sessionId", "userId", "role", "content", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Root user profile document"
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": "ChatSession",
+      "description": "User chat sessions"
+    },
+    "/users/{userId}/sessions/{sessionId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Messages within a user chat session"
+    }
+  }
+}
