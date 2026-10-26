@@ -52,6 +52,9 @@ class OllamaHttpException(
     val errorBody: String
 ) : OllamaException("Ollama HTTP $statusCode error: $errorBody")
 
+class OllamaProtocolException(message: String, cause: Throwable? = null) :
+    OllamaException(message, cause)
+
 /**
  * Utility to convert raw network exceptions into structured Ollama exceptions.
  */

@@ -41,7 +41,12 @@ class LocalBackend(
     )
 
     fun updateEndpoint(url: String, model: String? = null) {
-        endpointUrl = url.trim().removeSuffix("/")
+        val cleaned = url.trim()
+        if (cleaned.isEmpty() || !OllamaClient.isValidBaseUrl(cleaned)) {
+            return
+        }
+
+        endpointUrl = cleaned.removeSuffix("/")
         ollamaClient.updateEndpoint(endpointUrl)
         if (!model.isNullOrBlank()) {
             selectedModel = model

@@ -6,12 +6,17 @@ import com.example.backend.ollama.OllamaChatRequest
 import com.example.backend.ollama.OllamaClient
 import com.example.backend.ollama.OllamaMessage
 import com.example.backend.ollama.OllamaOptions
+import com.example.backend.ollama.OllamaProtocolException
 import com.example.backend.ollama.OllamaTagsResponse
 import com.example.backend.ollama.OllamaTimeoutException
 import com.example.backend.ollama.OllamaUnreachableException
 import com.example.backend.ollama.translateOllamaException
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.toList
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -28,6 +33,61 @@ class OllamaRetrofitUnitTest {
         assertEquals("http://10.0.2.2:11434/", OllamaClient.normalizeBaseUrl("http://10.0.2.2:11434/"))
         assertEquals("http://localhost:11434/", OllamaClient.normalizeBaseUrl("localhost:11434"))
         assertEquals("https://my-ollama.internal:11434/", OllamaClient.normalizeBaseUrl("https://my-ollama.internal:11434/"))
+        assertEquals("http://10.0.2.2:11434/", OllamaClient.normalizeBaseUrl("   "))
+        assertEquals("http://10.0.2.2:11434/", OllamaClient.normalizeBaseUrl("https://not a valid url"))
+        assertEquals("http://10.0.2.2:11434/", OllamaClient.normalizeBaseUrl("ftp://example.com"))
+    }
+
+    @Test
+    fun testBaseUrlValidationRejectsMalformedAddresses() {
+        assertTrue(OllamaClient.isValidBaseUrl("http://10.0.2.2:11434"))
+        assertTrue(OllamaClient.isValidBaseUrl("localhost:11434"))
+        assertTrue(OllamaClient.isValidBaseUrl("https://my-ollama.internal:11434/"))
+        assertTrue(!OllamaClient.isValidBaseUrl("   "))
+        assertTrue(!OllamaClient.isValidBaseUrl("ftp://example.com"))
+        assertTrue(!OllamaClient.isValidBaseUrl("http://bad host"))
+    }
+
+    @Test
+    fun testMalformedOllamaStreamRecordsFailExplicitly() {
+        val client = OllamaClient()
+        val chatError = runCatching {
+            client.parseChatStreamLine("{not-json}")
+        }.exceptionOrNull()
+        val generateError = runCatching {
+            client.parseGenerateStreamLine("{not-json}")
+        }.exceptionOrNull()
+
+        assertTrue(chatError is OllamaProtocolException)
+        assertTrue(generateError is OllamaProtocolException)
+        assertTrue(chatError?.message.orEmpty().contains("unparseable data"))
+    }
+
+    @Test
+    fun testOllamaStreamRecordsParseDeltasAndCompletion() {
+        val client = OllamaClient()
+        val chatChunk = client.parseChatStreamLine(
+            """{"message":{"role":"assistant","content":"hello"},"done":false}"""
+        )
+        val finalChunk = client.parseGenerateStreamLine(
+            """{"response":"","done":true}"""
+        )
+
+        assertEquals("hello", chatChunk.delta)
+        assertEquals(false, chatChunk.isComplete)
+        assertEquals(true, finalChunk.isComplete)
+    }
+
+    @Test
+    fun testTruncatedOllamaStreamReportsIncompleteResponse() = runBlocking {
+        val client = OllamaClient()
+        val body =
+            """{"message":{"role":"assistant","content":"partial"},"done":false}""".toResponseBody()
+
+        val chunks = client.streamFromBody(body, client::parseChatStreamLine).toList()
+
+        assertEquals("partial", chunks.first().delta)
+        assertTrue(chunks.last().error.orEmpty().contains("response may be incomplete"))
     }
 
     @Test
@@ -156,5 +216,14 @@ class OllamaRetrofitUnitTest {
         assertEquals("http://192.168.1.100:11434/", backend.ollamaClient.endpointUrl)
         assertEquals("qwen2.5-coder", backend.selectedModel)
         assertNotNull(backend.ollamaClient.service())
+    }
+
+    @Test
+    fun testUnreachableOllamaClientNeverInventsModels() = runBlocking {
+        val client = OllamaClient(initialEndpointUrl = "http://127.0.0.1:1")
+        val models = client.listModels()
+
+        assertTrue(models.isEmpty())
+        assertTrue(models.none { it.contains("llama") || it.contains("mistral") || it.contains("qwen") })
     }
 }

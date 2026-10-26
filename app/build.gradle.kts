@@ -16,8 +16,9 @@ android {
     applicationId = "com.aistudio.yslam.kpwzqd"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    val versionCodeOverride = providers.gradleProperty("versionCodeOverride").orNull
+    versionCode = versionCodeOverride?.toInt() ?: 1
+    versionName = providers.gradleProperty("versionNameOverride").orNull ?: "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

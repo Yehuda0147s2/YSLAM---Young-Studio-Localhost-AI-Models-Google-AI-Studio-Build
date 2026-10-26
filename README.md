@@ -42,7 +42,9 @@ export KEY_PASSWORD=...
 bash scripts/build-release.sh
 ```
 
-The script writes the APK to the project root as `yslam-1.0.0-release.apk`.
+The script writes the APK to the project root as `yslam-1.0.0-release.apk`. Set
+`VERSION_NAME` and `VERSION_CODE` before running it to override the APK metadata as well as the
+output filename.
 
 ## CI
 
@@ -53,3 +55,4 @@ The repository includes a GitHub Actions workflow in `.github/workflows/ci.yml` 
 - Local backend health is verified with live HTTP checks and real inference, not fabricated status.
 - API keys are stored via Android KeyStore protections and are never written to plain preferences.
 - A model is only treated as connected after the server responds and a real inference succeeds.
+- Gemini model choices are curated options, not live discovery; availability depends on the Firebase project.

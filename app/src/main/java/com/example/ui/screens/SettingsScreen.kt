@@ -338,6 +338,11 @@ fun SettingsScreen(
                 color = YslamCyan,
                 fontWeight = FontWeight.Bold
             )
+            Text(
+                text = "Curated options only; live model discovery is unavailable here, and access depends on your Firebase project.",
+                fontSize = 11.sp,
+                color = YslamTextMuted
+            )
             Spacer(modifier = Modifier.height(8.dp))
             val geminiModels = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite")
             geminiModels.forEach { model ->
@@ -363,7 +368,7 @@ fun SettingsScreen(
                             color = if (isSelected) YslamCyan else YslamTextPrimary
                         )
                         Text(
-                            text = if (model.contains("3.8")) "Recommended general purpose coding model" else "Ultra-fast lightweight workhorse",
+                            text = "Curated model option",
                             fontSize = 11.sp,
                             color = YslamTextMuted
                         )
@@ -587,7 +592,11 @@ fun SettingsScreen(
                         if (status.availableModels.isNotEmpty()) {
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "Discovered models: ${status.availableModels.joinToString(", ")}",
+                                text = if (activeBackend == BackendType.GEMINI) {
+                                    "Curated model options: ${status.availableModels.joinToString(", ")}"
+                                } else {
+                                    "Discovered local models: ${status.availableModels.joinToString(", ")}"
+                                },
                                 fontSize = 10.sp,
                                 fontFamily = JetBrainsMono,
                                 color = YslamCyan

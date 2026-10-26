@@ -75,3 +75,11 @@ data class OllamaTagsResponse(
 data class OllamaVersionResponse(
     @Json(name = "version") val version: String? = null
 )
+
+@JsonClass(generateAdapter = true)
+data class OllamaStreamRecord(
+    @Json(name = "message") val message: OllamaMessage? = null,
+    @Json(name = "response") val response: String? = null,
+    @Json(name = "done") val done: Boolean = false,
+    @Json(name = "error") val error: String? = null
+)
